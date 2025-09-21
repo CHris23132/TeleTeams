@@ -12,50 +12,86 @@ struct ConnectivityManagerView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !deviceManager.paired.isEmpty {
-                    Section("Paired") {
-                        ForEach(deviceManager.paired) { device in
-                            DeviceRow(
-                                device: device,
-                                feed: deviceManager.feedIfExists(for: device.id),
-                                connect: { deviceManager.connect(device) },
-                                disconnect: { deviceManager.disconnect(device) },
-                                pairToggle: { deviceManager.unpair(device) },
-                                assign: { role in deviceManager.assign(role, to: device) },
-                                remove: { role in deviceManager.remove(role, from: device) },
-                                toggleTalkback: { on in deviceManager.setTalkback(on, for: device) }
-                            )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    PairingOverviewCard()
+
+                    if !deviceManager.incomingRequests.isEmpty {
+                        PairingSection(title: "Incoming Requests") {
+                            ForEach(deviceManager.incomingRequests) { device in
+                                PairingDeviceCard(
+                                    device: device,
+                                    feed: deviceManager.feed(for: device),
+                                    cancelRequest: { deviceManager.declineIncomingRequest(for: device) },
+                                    acceptRequest: { deviceManager.acceptIncomingRequest(from: device) },
+                                    declineRequest: { deviceManager.declineIncomingRequest(for: device) },
+                                    selectRole: { role in deviceManager.assignRole(role, to: device) }
+                                )
+                            }
+                        }
+                    }
+
+                    if !deviceManager.outgoingRequests.isEmpty {
+                        PairingSection(title: "Awaiting Confirmation") {
+                            ForEach(deviceManager.outgoingRequests) { device in
+                                PairingDeviceCard(
+                                    device: device,
+                                    feed: deviceManager.feed(for: device),
+                                    cancelRequest: { deviceManager.cancelPairingRequest(for: device) }
+                                )
+                            }
+                        }
+                    }
+
+                    if !deviceManager.awaitingRoleDevices.isEmpty {
+                        PairingSection(title: "Select a Role") {
+                            ForEach(deviceManager.awaitingRoleDevices) { device in
+                                PairingDeviceCard(
+                                    device: device,
+                                    feed: deviceManager.feed(for: device),
+                                    cancelRequest: { deviceManager.cancelPairingRequest(for: device) },
+                                    selectRole: { role in deviceManager.assignRole(role, to: device) }
+                                )
+                            }
+                        }
+                    }
+
+                    if !deviceManager.pairedDevices.isEmpty {
+                        PairingSection(title: "Active Devices") {
+                            ForEach(deviceManager.pairedDevices) { device in
+                                PairingDeviceCard(
+                                    device: device,
+                                    feed: deviceManager.feed(for: device),
+                                    selectRole: { role in deviceManager.assignRole(role, to: device) },
+                                    unpair: { deviceManager.unpair(device) }
+                                )
+                            }
+                        }
+                    }
+
+                    if !deviceManager.discoverableDevices.isEmpty {
+                        PairingSection(title: "Discoverable Nearby Devices") {
+                            ForEach(deviceManager.discoverableDevices) { device in
+                                PairingDeviceCard(
+                                    device: device,
+                                    feed: deviceManager.feed(for: device),
+                                    requestPair: { deviceManager.requestPairing(with: device) }
+                                )
+                            }
                         }
                     }
                 }
-
-                Section("Nearby") {
-                    ForEach(deviceManager.nearby) { device in
-                        DeviceRow(
-                            device: device,
-                            feed: deviceManager.feedIfExists(for: device.id),
-                            connect: {
-                                deviceManager.pair(device)
-                                deviceManager.connect(device)
-                            },
-                            disconnect: { deviceManager.disconnect(device) },
-                            pairToggle: { deviceManager.pair(device) },
-                            assign: { role in deviceManager.assign(role, to: device) },
-                            remove: { role in deviceManager.remove(role, from: device) },
-                            toggleTalkback: { on in deviceManager.setTalkback(on, for: device) }
-                        )
-                    }
-                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
             }
-            .listStyle(.insetGrouped)
-            .navigationTitle("Connectivity Manager")
+            .background(Color.black.opacity(0.9).ignoresSafeArea())
+            .navigationTitle("Pair Devices")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         deviceManager.startDiscovery()
                     } label: {
-                        Label("Scan", systemImage: "arrow.clockwise")
+                        Label("Refresh", systemImage: "arrow.clockwise")
                     }
                 }
             }
@@ -63,121 +99,207 @@ struct ConnectivityManagerView: View {
     }
 }
 
-// MARK: - Device Row
-private struct DeviceRow: View {
-    let device: Device
-    let feed: DeviceVideoFeed?
-    let connect: () -> Void
-    let disconnect: () -> Void
-    let pairToggle: () -> Void
-    let assign: (Device.Role) -> Void
-    let remove: (Device.Role) -> Void
-    let toggleTalkback: (Bool) -> Void
-
-    @State private var showPreview = false
+// MARK: - Sections & Cards
+private struct PairingSection<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header
-            HStack {
-                Label(device.name, systemImage: icon(for: device.type))
-                    .font(.headline)
-                Spacer(minLength: 8)
-                HStack(spacing: 6) {
-                    ForEach(Array(device.transports), id: \.self) { t in
-                        Text(t.rawValue)
-                            .font(.caption2)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.gray.opacity(0.2), in: Capsule())
-                    }
-                }
-            }
-
-            // Role assignment
-            HStack(spacing: 10) {
-                roleChip(.camera, enabled: device.roles.contains(.camera), available: device.supportsVideo) { toggled in
-                    toggled ? assign(.camera) : remove(.camera)
-                }
-                roleChip(.mic, enabled: device.roles.contains(.mic), available: device.supportsAudioIn) { toggled in
-                    toggled ? assign(.mic) : remove(.mic)
-                }
-                roleChip(.speaker, enabled: device.roles.contains(.speaker), available: device.supportsAudioOut) { toggled in
-                    toggled ? assign(.speaker) : remove(.speaker)
-                }
-            }
-
-            // Controls
-            HStack(spacing: 12) {
-                switch device.connection {
-                case .disconnected:
-                    Button(action: connect) {
-                        Label("Connect", systemImage: "link")
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                case .connecting:
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.green)
-                    Button(role: .destructive, action: disconnect) {
-                        Label("Cancel", systemImage: "xmark")
-                    }
-                    .buttonStyle(.bordered)
-
-                case .connected:
-                    Button(role: .destructive, action: disconnect) {
-                        Label("Disconnect", systemImage: "link.slash")
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                if device.supportsVideo {
-                    Button {
-                        showPreview.toggle()
-                    } label: {
-                        Label("Preview", systemImage: "video")
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                if device.supportsAudioIn && device.supportsAudioOut {
-                    Toggle(isOn: .init(
-                        get: { device.talkbackEnabled },
-                        set: { toggleTalkback($0) }
-                    )) {
-                        Label("Talkback", systemImage: "waveform")
-                    }
-                    .toggleStyle(SwitchToggleStyle(tint: .green))
-                }
-
-                Spacer()
-
-                Button(action: pairToggle) {
-                    Label(device.isPaired ? "Unpair" : "Pair",
-                          systemImage: device.isPaired ? "lock.open" : "lock")
-                }
-                .buttonStyle(.bordered)
-            }
-
-            if showPreview && device.supportsVideo {
-                DevicePreviewSurface(feed: feed)
-                    .frame(height: 140)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .transition(.opacity.combined(with: .scale))
-            }
-
-            // Connection state line
-            HStack(spacing: 8) {
-                Circle()
-                    .frame(width: 8, height: 8)
-                    .foregroundStyle(color(for: device.connection))
-                Text(device.connection.rawValue.capitalized)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white.opacity(0.85))
+            VStack(spacing: 16) {
+                content
             }
         }
-        .padding(.vertical, 6)
+    }
+}
+
+private struct PairingOverviewCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Pair nearby devices to assign roles and instantly light up their live feeds on the stage.")
+                .font(.title3.bold())
+                .foregroundStyle(.white)
+            Text("Each device confirms the pairing handshake, then chooses to act as a publishing camera or a viewer. Cameras begin streaming automatically once assigned.")
+                .foregroundStyle(.white.opacity(0.72))
+                .font(.callout)
+        }
+        .padding(20)
+        .background(
+            LinearGradient(colors: [Color(hue: 0.64, saturation: 0.7, brightness: 0.3), Color(hue: 0.72, saturation: 0.7, brightness: 0.32)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+private struct PairingDeviceCard: View {
+    let device: Device
+    @ObservedObject private var feed: DeviceVideoFeed
+    var requestPair: () -> Void = {}
+    var cancelRequest: () -> Void = {}
+    var acceptRequest: () -> Void = {}
+    var declineRequest: () -> Void = {}
+    var selectRole: (Device.Role) -> Void = { _ in }
+    var unpair: () -> Void = {}
+
+    init(device: Device,
+         feed: DeviceVideoFeed,
+         requestPair: @escaping () -> Void = {},
+         cancelRequest: @escaping () -> Void = {},
+         acceptRequest: @escaping () -> Void = {},
+         declineRequest: @escaping () -> Void = {},
+         selectRole: @escaping (Device.Role) -> Void = { _ in },
+         unpair: @escaping () -> Void = {}) {
+        self.device = device
+        _feed = ObservedObject(wrappedValue: feed)
+        self.requestPair = requestPair
+        self.cancelRequest = cancelRequest
+        self.acceptRequest = acceptRequest
+        self.declineRequest = declineRequest
+        self.selectRole = selectRole
+        self.unpair = unpair
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            Divider().background(Color.white.opacity(0.08))
+            actionArea
+            if shouldShowPreview {
+                DevicePreviewSurface(feed: feed)
+                    .frame(height: 160)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .transition(.opacity)
+            }
+        }
+        .padding(18)
+        .background(cardBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: 1.2)
+        )
+    }
+
+    private var shouldShowPreview: Bool {
+        device.role == .camera || feed.isPublishing
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: icon(for: device.type))
+                    .font(.title2)
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color.white.opacity(0.08), in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(device.name)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(deviceDescription)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                    HStack(spacing: 8) {
+                        ForEach(Array(device.transports), id: \.self) { transport in
+                            Text(transport.rawValue)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.white.opacity(0.08), in: Capsule())
+                        }
+                    }
+                }
+                Spacer()
+                if let role = device.role {
+                    Label(role.rawValue, systemImage: role == .camera ? "video.fill" : "eye")
+                        .font(.footnote.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(roleColor(for: role).opacity(0.18), in: Capsule())
+                        .foregroundStyle(roleColor(for: role))
+                }
+            }
+            Text(feed.connectionState)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.65))
+        }
+    }
+
+    @ViewBuilder
+    private var actionArea: some View {
+        switch device.pairingProgress {
+        case .discoverable:
+            Button(action: requestPair) {
+                Label("Request Pairing", systemImage: "link")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+        case .outgoingRequest:
+            HStack(spacing: 12) {
+                Label("Waiting for remote confirmation…", systemImage: "hourglass")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                Button("Cancel", role: .destructive, action: cancelRequest)
+                    .buttonStyle(.bordered)
+            }
+        case .incomingRequest:
+            VStack(alignment: .leading, spacing: 12) {
+                Text("This device tapped you to pair. Confirm to continue.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.75))
+                HStack(spacing: 14) {
+                    Button("Decline", role: .destructive, action: declineRequest)
+                        .buttonStyle(.bordered)
+                    Button("Accept") { acceptRequest() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                }
+            }
+        case .awaitingRoleSelection:
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Choose how this device will participate.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.75))
+                RoleSelector(currentRole: device.role, selectRole: selectRole)
+                Button("Cancel Pairing", role: .destructive, action: cancelRequest)
+                    .buttonStyle(.bordered)
+            }
+        case .paired:
+            VStack(alignment: .leading, spacing: 14) {
+                RoleSelector(currentRole: device.role, selectRole: selectRole)
+                HStack {
+                    Label(device.connection.displayLabel, systemImage: "dot.radiowaves.left.and.right")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                    Spacer()
+                    Button("Unpair", role: .destructive, action: unpair)
+                        .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(Color.white.opacity(0.05))
+    }
+
+    private var deviceDescription: String {
+        switch device.type {
+        case .phone: return "Phone"
+        case .tablet: return "Tablet"
+        case .wearable: return "Wearable"
+        case .capture: return "Capture Source"
+        }
     }
 
     private func icon(for kind: Device.Kind) -> String {
@@ -189,90 +311,98 @@ private struct DeviceRow: View {
         }
     }
 
-    private func color(for state: Device.Connection) -> Color {
-        switch state {
-        case .disconnected: return .gray
-        case .connecting:   return .yellow
-        case .connected:    return .green
-        }
-    }
-
-    private func roleChip(_ role: Device.Role,
-                          enabled: Bool,
-                          available: Bool,
-                          onToggle: @escaping (Bool) -> Void) -> some View {
-        Button {
-            guard available else { return }
-            onToggle(!enabled)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: symbol(for: role))
-                Text(role.rawValue)
-            }
-            .font(.caption)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                available
-                  ? (enabled ? Color.green.opacity(0.25) : Color.gray.opacity(0.2))
-                  : Color.gray.opacity(0.2),
-                in: Capsule()
-            )
-            .overlay(
-                Capsule().stroke(enabled ? Color.green : Color.gray.opacity(0.3),
-                                 lineWidth: enabled ? 1 : 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(available ? (enabled ? .green : .primary) : .secondary)
-        .opacity(available ? 1.0 : 0.5)
-    }
-
-    private func symbol(for role: Device.Role) -> String {
+    private func roleColor(for role: Device.Role) -> Color {
         switch role {
-        case .camera: return "camera.fill"
-        case .mic: return "mic.fill"
-        case .speaker: return "speaker.wave.2.fill"
+        case .camera: return .green
+        case .viewer: return .blue
+        }
+    }
+
+    private var borderColor: Color {
+        switch device.pairingProgress {
+        case .discoverable: return Color.white.opacity(0.08)
+        case .outgoingRequest: return Color.orange.opacity(0.5)
+        case .incomingRequest: return Color.yellow.opacity(0.5)
+        case .awaitingRoleSelection: return Color.purple.opacity(0.5)
+        case .paired:
+            if let role = device.role { return roleColor(for: role).opacity(0.6) }
+            return Color.white.opacity(0.12)
         }
     }
 }
 
-private struct DevicePreviewSurface: View {
-    let feed: DeviceVideoFeed?
+private struct RoleSelector: View {
+    var currentRole: Device.Role?
+    var selectRole: (Device.Role) -> Void
 
     var body: some View {
-        Group {
-            if let feed, feed.isPublishing, feed.isVideoEnabled, let image = feed.currentFrame {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .overlay(alignment: .topLeading) {
-                        previewOverlay(state: feed.connectionState)
-                    }
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.black.opacity(0.6))
-                    VStack(spacing: 8) {
-                        Image(systemName: "video.fill")
-                            .font(.largeTitle)
-                            .foregroundStyle(.white.opacity(0.9))
-                        Text("Video Preview")
-                            .foregroundStyle(.white.opacity(0.8))
-                            .font(.footnote)
-                    }
+        HStack(spacing: 12) {
+            ForEach(Device.Role.allCases, id: \.self) { role in
+                Button {
+                    selectRole(role)
+                } label: {
+                    Label(role.rawValue, systemImage: icon(for: role))
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(background(for: role), in: Capsule())
+                        .foregroundStyle(foreground(for: role))
                 }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    @ViewBuilder
-    private func previewOverlay(state: String) -> some View {
-        Text(state)
+    private func icon(for role: Device.Role) -> String {
+        role == .camera ? "video.fill" : "eye"
+    }
+
+    private func background(for role: Device.Role) -> Color {
+        let color = foreground(for: role)
+        return color.opacity(currentRole == role ? 0.25 : 0.12)
+    }
+
+    private func foreground(for role: Device.Role) -> Color {
+        role == .camera ? .green : .blue
+    }
+}
+
+private struct DevicePreviewSurface: View {
+    @ObservedObject var feed: DeviceVideoFeed
+
+    var body: some View {
+        ZStack {
+            if feed.isPublishing, feed.isVideoEnabled, let image = feed.currentFrame {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .overlay(alignment: .topLeading) {
+                        previewOverlay
+                    }
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.black.opacity(0.7))
+                    .overlay(alignment: .center) {
+                        VStack(spacing: 8) {
+                            Image(systemName: "video")
+                                .font(.largeTitle)
+                                .foregroundStyle(.white.opacity(0.85))
+                            Text(feed.connectionState)
+                                .foregroundStyle(.white.opacity(0.75))
+                                .font(.footnote)
+                        }
+                    }
+            }
+        }
+        .clipped()
+    }
+
+    private var previewOverlay: some View {
+        Text(feed.roleLabel)
             .font(.caption.bold())
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.black.opacity(0.5), in: Capsule())
+            .background(Color.black.opacity(0.6), in: Capsule())
             .foregroundStyle(.white)
             .padding(10)
     }

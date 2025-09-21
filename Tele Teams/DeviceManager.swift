@@ -14,30 +14,33 @@ import VideoToolbox
 
 @MainActor
 final class DeviceManager: ObservableObject {
-    @Published var nearby: [Device] = []
-    @Published var paired: [Device] = []
+    @Published private(set) var devices: [Device] = []
     @Published private(set) var videoFeeds: [UUID: DeviceVideoFeed] = [:]
 
     private var discoveryTimer: Timer?
+    private var streamers: [UUID: VideoStreamSimulator] = [:]
 
-    init() { startDiscovery() }
+    init() {
+        startDiscovery()
+    }
 
+    // MARK: - Discovery & Presence
     func startDiscovery() {
         stopDiscovery()
-        // Mock discovery feed; replace with your real discovery pipeline (e.g., Bonjour, Multipeer, USB/UVC scan, etc.)
-        discoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let samples: [Device] = [
+
+        if devices.isEmpty {
+            devices = [
                 Device(name: "iPhone 15 Pro", type: .phone, transports: [.wifi, .bleControl], capabilities: [.camera, .mic, .speaker]),
-                Device(name: "iPad Mini", type: .tablet, transports: [.wifi, .bleControl], capabilities: [.camera, .mic, .speaker]),
-                Device(name: "UVC Capture", type: .capture, transports: [.usb], capabilities: [.camera]),
-                Device(name: "Watch Ultra", type: .wearable, transports: [.bleControl], capabilities: [.mic, .speaker])
+                Device(name: "Body Cam", type: .wearable, transports: [.bleControl], capabilities: [.camera, .mic]),
+                Device(name: "iPad Mini", type: .tablet, transports: [.wifi], capabilities: [.camera, .mic, .speaker]),
+                Device(name: "Drone Stream", type: .capture, transports: [.wifi], capabilities: [.camera])
             ]
-            // De-dupe by id/name in a real implementation; here we rotate a few
-            if self.nearby.isEmpty {
-                self.nearby = samples
-            } else {
-                self.nearby.shuffle()
+        }
+
+        discoveryTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.simulateIncomingRequestIfNeeded()
             }
         }
     }
@@ -47,66 +50,84 @@ final class DeviceManager: ObservableObject {
         discoveryTimer = nil
     }
 
-    func pair(_ device: Device) {
-        // Avoid duplicates
-        if !paired.contains(where: { $0.id == device.id }) {
-            var d = device
-            d.isPaired = true
-            paired.append(d)
-            nearby.removeAll { $0.id == device.id }
+    // MARK: - Pairing workflow
+    func requestPairing(with device: Device) {
+        guard let current = device(for: device.id), current.pairingProgress == .discoverable else { return }
+        mutateDevice(id: device.id) { device in
+            device.pairingProgress = .outgoingRequest
+            device.connection = .pairing
+        }
+
+        // Simulate the remote user tapping to confirm pairing after a brief delay.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            self.mutateDevice(id: device.id) { device in
+                if device.pairingProgress == .outgoingRequest {
+                    device.pairingProgress = .awaitingRoleSelection
+                }
+            }
+        }
+    }
+
+    func acceptIncomingRequest(from device: Device) {
+        mutateDevice(id: device.id) { device in
+            guard device.pairingProgress == .incomingRequest else { return }
+            device.pairingProgress = .awaitingRoleSelection
+        }
+    }
+
+    func declineIncomingRequest(for device: Device) {
+        mutateDevice(id: device.id) { device in
+            guard device.pairingProgress == .incomingRequest else { return }
+            device.pairingProgress = .discoverable
+            device.connection = .disconnected
+        }
+        markPublishing(false, deviceId: device.id)
+    }
+
+    func cancelPairingRequest(for device: Device) {
+        mutateDevice(id: device.id) { device in
+            guard device.pairingProgress == .outgoingRequest || device.pairingProgress == .awaitingRoleSelection else { return }
+            device.pairingProgress = .discoverable
+            device.connection = .disconnected
+            device.role = nil
+        }
+        markPublishing(false, deviceId: device.id)
+    }
+
+    func assignRole(_ role: Device.Role, to device: Device) {
+        mutateDevice(id: device.id) { device in
+            device.role = role
+            device.pairingProgress = .paired
+            device.connection = role == .camera ? .streaming : .connected
+        }
+
+        if role == .camera {
+            markPublishing(true, deviceId: device.id)
+        } else {
+            markPublishing(false, deviceId: device.id)
+            if let feed = videoFeeds[device.id] {
+                feed.connectionState = "Viewer Connected"
+                feed.isMuted = false
+                feed.isSpeaking = false
+            }
         }
     }
 
     func unpair(_ device: Device) {
-        paired.removeAll { $0.id == device.id }
-        var d = device
-        d.isPaired = false
-        if !nearby.contains(where: { $0.id == device.id }) {
-            nearby.append(d)
+        mutateDevice(id: device.id) { device in
+            device.pairingProgress = .discoverable
+            device.connection = .disconnected
+            device.role = nil
         }
-    }
-
-    func connect(_ device: Device) {
-        update(device) { $0.connection = .connecting }
-        // Simulate async connect
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            self.update(device) { d in
-                d.connection = .connected
-                // Default routing: Wi-Fi/USB carry streams; BLE only control
-                if d.transports.contains(.usb) || d.transports.contains(.wifi) {
-                    // keep as-is; in real impl wire the streams
-                }
-            }
-            if let updated = self.device(for: device.id) {
-                let feed = self.feed(for: updated)
-                feed.connectionState = "Connected"
-            }
-        }
-    }
-
-    func disconnect(_ device: Device) {
-        update(device) {
-            $0.connection = .disconnected
-            $0.talkbackEnabled = false
-            // Keep roles as assigned, just drop the live streams
-        }
+        markPublishing(false, deviceId: device.id)
         if let feed = videoFeeds[device.id] {
             feed.reset()
+            feed.connectionState = "Discoverable"
         }
     }
 
-    func assign(_ role: Device.Role, to device: Device) {
-        update(device) { $0.roles.insert(role) }
-    }
-
-    func remove(_ role: Device.Role, from device: Device) {
-        update(device) { $0.roles.remove(role) }
-    }
-
-    func setTalkback(_ enabled: Bool, for device: Device) {
-        update(device) { $0.talkbackEnabled = enabled }
-    }
-
+    // MARK: - Stage Controls
     func toggleMute(for deviceId: UUID) {
         guard let feed = videoFeeds[deviceId] else { return }
         feed.isMuted.toggle()
@@ -116,35 +137,50 @@ final class DeviceManager: ObservableObject {
         guard let feed = videoFeeds[deviceId] else { return }
         feed.isVideoEnabled.toggle()
         if !feed.isVideoEnabled {
-            feed.connectionState = "Video Off"
             feed.currentFrame = nil
-        } else if feed.isPublishing {
+            feed.connectionState = "Video Disabled"
+            stopStream(for: deviceId)
+        } else {
             feed.connectionState = "Streaming"
-        } else if let device = device(for: deviceId) {
-            feed.connectionState = device.connection.displayLabel
+            startStream(for: deviceId, feed: feed)
         }
     }
 
     func markPublishing(_ isPublishing: Bool, deviceId: UUID) {
-        guard let feed = videoFeeds[deviceId] else { return }
+        guard device(for: deviceId) != nil else { return }
+        mutateDevice(id: deviceId) { device in
+            if isPublishing {
+                device.connection = .streaming
+            } else if device.role == .viewer {
+                device.connection = .connected
+            } else if device.pairingProgress == .paired {
+                device.connection = .pairing
+            } else {
+                device.connection = .disconnected
+            }
+        }
+
+        guard let updatedDevice = device(for: deviceId) else { return }
+        guard let feed = videoFeeds[deviceId] ?? (updatedDevice.role != nil ? feed(for: updatedDevice) : nil) else { return }
         feed.isPublishing = isPublishing
         if isPublishing {
             feed.connectionState = "Streaming"
-        } else if let device = device(for: deviceId) {
-            feed.connectionState = device.connection.displayLabel
-            feed.currentFrame = nil
+            feed.isVideoEnabled = true
+            startStream(for: deviceId, feed: feed)
         } else {
-            feed.connectionState = "Idle"
+            feed.connectionState = updatedDevice.connection.displayLabel
             feed.currentFrame = nil
+            stopStream(for: deviceId)
         }
     }
 
     func mediaSender(for deviceId: UUID) -> MediaSender? {
-        guard let device = device(for: deviceId) else { return nil }
+        guard let device = device(for: deviceId), device.role == .camera else { return nil }
         let feed = feed(for: device)
         return DeviceLoopbackMediaSender(deviceId: deviceId, manager: self, feed: feed)
     }
 
+    // MARK: - Lookup Helpers
     func feed(for device: Device) -> DeviceVideoFeed {
         if let existing = videoFeeds[device.id] {
             existing.update(from: device)
@@ -160,44 +196,81 @@ final class DeviceManager: ObservableObject {
     }
 
     func device(for id: UUID) -> Device? {
-        if let paired = paired.first(where: { $0.id == id }) { return paired }
-        if let nearby = nearby.first(where: { $0.id == id }) { return nearby }
-        return nil
+        devices.first { $0.id == id }
     }
 
-    // MARK: - Helpers
-    private func update(_ device: Device, mutate: (inout Device) -> Void) {
-        if let idx = paired.firstIndex(where: { $0.id == device.id }) {
-            var copy = paired[idx]
-            mutate(&copy)
-            paired[idx] = copy
-            syncFeed(with: copy)
-        } else if let idx = nearby.firstIndex(where: { $0.id == device.id }) {
-            var copy = nearby[idx]
-            mutate(&copy)
-            nearby[idx] = copy
-            syncFeed(with: copy)
-        }
+    var discoverableDevices: [Device] {
+        devices.filter { $0.pairingProgress == .discoverable }
+    }
+
+    var incomingRequests: [Device] {
+        devices.filter { $0.pairingProgress == .incomingRequest }
+    }
+
+    var outgoingRequests: [Device] {
+        devices.filter { $0.pairingProgress == .outgoingRequest }
+    }
+
+    var awaitingRoleDevices: [Device] {
+        devices.filter { $0.pairingProgress == .awaitingRoleSelection }
+    }
+
+    var pairedDevices: [Device] {
+        devices.filter { $0.pairingProgress == .paired && $0.role != nil }
+    }
+
+    var cameraDevices: [Device] {
+        pairedDevices.filter { $0.role == .camera }
+    }
+
+    // MARK: - Internal Helpers
+    private func mutateDevice(id: UUID, mutate: (inout Device) -> Void) {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+        var copy = devices[index]
+        mutate(&copy)
+        devices[index] = copy
+        syncFeed(with: copy)
     }
 
     private func syncFeed(with device: Device) {
-        guard device.roles.contains(.camera) else { return }
         let feed = feed(for: device)
         feed.update(from: device)
     }
+
+    private func startStream(for deviceId: UUID, feed: DeviceVideoFeed) {
+        if streamers[deviceId] == nil {
+            streamers[deviceId] = VideoStreamSimulator(feed: feed)
+        }
+        streamers[deviceId]?.start()
+    }
+
+    private func stopStream(for deviceId: UUID) {
+        streamers[deviceId]?.stop()
+        streamers.removeValue(forKey: deviceId)
+    }
+
+    private func simulateIncomingRequestIfNeeded() {
+        guard let device = devices.first(where: { $0.pairingProgress == .discoverable }) else { return }
+        mutateDevice(id: device.id) { device in
+            device.pairingProgress = .incomingRequest
+            device.connection = .pairing
+        }
+    }
 }
 
+// MARK: - Models
 struct Device: Identifiable, Hashable {
     enum Kind: String { case phone, tablet, wearable, capture }
-    enum Transport: String, Hashable { case wifi = "Wi-Fi", usb = "USB", bleControl = "BLE (control)" }
+    enum Transport: String, Hashable { case wifi = "Wi-Fi", usb = "USB", bleControl = "BLE" }
     struct Capability: OptionSet, Hashable {
         let rawValue: Int
         static let camera  = Capability(rawValue: 1 << 0)
         static let mic     = Capability(rawValue: 1 << 1)
         static let speaker = Capability(rawValue: 1 << 2)
     }
-    enum Connection: String { case disconnected, connecting, connected }
-    enum Role: String, CaseIterable, Hashable { case camera = "Camera", mic = "Mic", speaker = "Speaker" }
+    enum Connection: String { case disconnected, pairing, connected, streaming }
+    enum Role: String, CaseIterable { case camera = "Camera", viewer = "Viewer" }
+    enum PairingProgress: Equatable { case discoverable, outgoingRequest, incomingRequest, awaitingRoleSelection, paired }
 
     let id = UUID()
     var name: String
@@ -205,12 +278,10 @@ struct Device: Identifiable, Hashable {
     var transports: Set<Transport>
     var capabilities: Capability
 
-    var isPaired: Bool = false
+    var pairingProgress: PairingProgress = .discoverable
     var connection: Connection = .disconnected
-    var roles: Set<Role> = []
-    var talkbackEnabled: Bool = false
+    var role: Role?
 
-    // Convenience flags
     var supportsVideo: Bool { capabilities.contains(.camera) }
     var supportsAudioIn: Bool { capabilities.contains(.mic) }
     var supportsAudioOut: Bool { capabilities.contains(.speaker) }
@@ -220,6 +291,7 @@ struct Device: Identifiable, Hashable {
 final class DeviceVideoFeed: ObservableObject, Identifiable {
     let deviceId: UUID
     @Published var deviceName: String
+    @Published var roleLabel: String
     @Published var currentFrame: UIImage?
     @Published var isPublishing: Bool = false
     @Published var isMuted: Bool = false
@@ -230,26 +302,47 @@ final class DeviceVideoFeed: ObservableObject, Identifiable {
     init(device: Device) {
         self.deviceId = device.id
         self.deviceName = device.name
+        self.roleLabel = device.role?.rawValue ?? "Unassigned"
         self.connectionState = device.connection.displayLabel
     }
 
     func update(from device: Device) {
         deviceName = device.name
-        if !isPublishing && connectionState != "Video Off" {
-            connectionState = device.connection.displayLabel
+        roleLabel = device.role?.rawValue ?? "Unassigned"
+        if !isPublishing {
+            switch device.pairingProgress {
+            case .discoverable:
+                connectionState = "Discoverable"
+            case .outgoingRequest:
+                connectionState = "Awaiting Confirmation"
+            case .incomingRequest:
+                connectionState = "Incoming Request"
+            case .awaitingRoleSelection:
+                connectionState = "Select Role"
+            case .paired:
+                if device.role == .viewer {
+                    connectionState = "Viewer Connected"
+                } else if device.role == .camera {
+                    connectionState = "Camera Ready"
+                } else {
+                    connectionState = device.connection.displayLabel
+                }
+            }
         }
     }
 
     func reset() {
         isPublishing = false
         currentFrame = nil
-        connectionState = "Disconnected"
+        connectionState = "Offline"
         isVideoEnabled = true
         isMuted = false
         isSpeaking = false
+        roleLabel = "Unassigned"
     }
 }
 
+@MainActor
 final class DeviceLoopbackMediaSender: MediaSender {
     private let deviceId: UUID
     private weak var manager: DeviceManager?
@@ -290,6 +383,7 @@ final class DeviceLoopbackMediaSender: MediaSender {
         Task { @MainActor in
             guard self.feed.isVideoEnabled else { return }
             self.feed.currentFrame = image
+            self.feed.isSpeaking = Bool.random() && Bool.random()
         }
     }
 
@@ -306,12 +400,85 @@ final class DeviceLoopbackMediaSender: MediaSender {
     }
 }
 
+@MainActor
+private final class VideoStreamSimulator {
+    private weak var feed: DeviceVideoFeed?
+    private var timer: Timer?
+    private var hue: CGFloat = .random(in: 0 ... 1)
+    private var tick: Int = 0
+
+    init(feed: DeviceVideoFeed) {
+        self.feed = feed
+    }
+
+    func start() {
+        stop()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.renderFrame()
+            }
+        }
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func renderFrame() {
+        guard let feed else {
+            stop()
+            return
+        }
+
+        guard feed.isVideoEnabled else { return }
+
+        let size = CGSize(width: 640, height: 360)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let currentHue = hue
+        let image = renderer.image { ctx in
+            UIColor(hue: currentHue, saturation: 0.65, brightness: 0.85, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+
+            let stripeColor = UIColor(hue: (currentHue + 0.2).truncatingRemainder(dividingBy: 1), saturation: 0.55, brightness: 0.9, alpha: 0.65)
+            stripeColor.setFill()
+            let stripePath = UIBezierPath(roundedRect: CGRect(x: 0, y: size.height * 0.6, width: size.width, height: size.height * 0.45), cornerRadius: 36)
+            stripePath.fill()
+
+            let textAttributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 40),
+                .foregroundColor: UIColor.white
+            ]
+            let subtitleAttributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 22, weight: .medium),
+                .foregroundColor: UIColor(white: 1, alpha: 0.8)
+            ]
+
+            let name = feed.deviceName as NSString
+            name.draw(in: CGRect(x: 24, y: size.height * 0.62, width: size.width - 48, height: 44), withAttributes: textAttributes)
+            let subtitle = "Live POV" as NSString
+            subtitle.draw(in: CGRect(x: 24, y: size.height * 0.62 + 44, width: size.width - 48, height: 30), withAttributes: subtitleAttributes)
+        }
+
+        feed.currentFrame = image
+        feed.isSpeaking = tick % 3 == 0
+
+        hue += 0.015
+        if hue > 1 { hue -= 1 }
+        tick += 1
+    }
+}
+
 private extension Device.Connection {
     var displayLabel: String {
         switch self {
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting"
+        case .disconnected: return "Offline"
+        case .pairing: return "Pairing"
         case .connected: return "Connected"
+        case .streaming: return "Streaming"
         }
     }
 }

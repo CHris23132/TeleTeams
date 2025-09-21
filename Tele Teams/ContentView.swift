@@ -14,6 +14,8 @@ struct StageParticipant: Identifiable, Hashable {
 
     var id: UUID { device.id }
     var name: String { device.name }
+    var role: Device.Role? { device.role }
+    var roleLabel: String { device.role?.rawValue ?? "" }
 
     static func == (lhs: StageParticipant, rhs: StageParticipant) -> Bool {
         lhs.device.id == rhs.device.id
@@ -22,6 +24,15 @@ struct StageParticipant: Identifiable, Hashable {
     func hash(into hasher: inout Hasher) {
         hasher.combine(device.id)
     }
+}
+
+struct ParticipantDisplay: Identifiable {
+    let device: Device
+    let feed: DeviceVideoFeed
+
+    var id: UUID { device.id }
+    var name: String { device.name }
+    var role: Device.Role? { device.role }
 }
 
 // MARK: - Root View
@@ -37,9 +48,14 @@ struct ContentView: View {
     @State private var compactTab: CompactTab = .stage
 
     private var stageParticipants: [StageParticipant] {
-        deviceManager.paired
-            .filter { $0.connection == .connected && $0.roles.contains(.camera) }
+        deviceManager.cameraDevices
             .map { StageParticipant(device: $0, feed: deviceManager.feed(for: $0)) }
+            .sorted { $0.name < $1.name }
+    }
+
+    private var sidebarParticipants: [ParticipantDisplay] {
+        deviceManager.pairedDevices
+            .map { ParticipantDisplay(device: $0, feed: deviceManager.feed(for: $0)) }
             .sorted { $0.name < $1.name }
     }
 
@@ -84,7 +100,7 @@ struct ContentView: View {
                             case .participants:
                                 ScrollView {
                                     Sidebar(
-                                        participants: stageParticipants,
+                                        participants: sidebarParticipants,
                                         selectedId: $selectedDeviceId,
                                         onSettings: { showConnectivityManager = true },
                                         onCamera: presentCameraPublisher,
@@ -116,7 +132,7 @@ struct ContentView: View {
                 // Regular iPad/large layout
                 HStack(spacing: 0) {
                     Sidebar(
-                        participants: stageParticipants,
+                        participants: sidebarParticipants,
                         selectedId: $selectedDeviceId,
                         onSettings: { showConnectivityManager = true },
                         onCamera: presentCameraPublisher,
@@ -187,7 +203,7 @@ struct ContentView: View {
         .onAppear {
             alignSelection()
         }
-        .onReceive(deviceManager.$paired) { _ in alignSelection() }
+        .onReceive(deviceManager.$devices) { _ in alignSelection() }
         .alert("Camera Publisher", isPresented: .init(
             get: { cameraError != nil },
             set: { if !$0 { cameraError = nil } }
@@ -199,12 +215,16 @@ struct ContentView: View {
     }
 
     private func toggleMuteSelected() {
-        guard let id = selectedDeviceId else { return }
+        guard let id = selectedDeviceId,
+              let device = deviceManager.device(for: id),
+              device.role == .camera else { return }
         deviceManager.toggleMute(for: id)
     }
 
     private func toggleVideoSelected() {
-        guard let id = selectedDeviceId else { return }
+        guard let id = selectedDeviceId,
+              let device = deviceManager.device(for: id),
+              device.role == .camera else { return }
         deviceManager.toggleVideo(for: id)
     }
 
@@ -221,11 +241,8 @@ struct ContentView: View {
             cameraError = "No camera-capable devices are paired. Pair and connect a device in the Connectivity Manager first."
             return
         }
-        if target.connection == .disconnected {
-            deviceManager.connect(target)
-        }
-        if !target.roles.contains(.camera) {
-            deviceManager.assign(.camera, to: target)
+        if target.role != .camera {
+            deviceManager.assignRole(.camera, to: target)
         }
         guard let sender = deviceManager.mediaSender(for: target.id) else {
             cameraError = "Unable to create a media sender for \(target.name)."
@@ -236,19 +253,18 @@ struct ContentView: View {
     }
 
     private func cameraTargetDevice() -> Device? {
-        if let id = selectedDeviceId, let device = deviceManager.device(for: id) {
+        if let id = selectedDeviceId,
+           let device = deviceManager.device(for: id),
+           device.role == .camera {
             return device
         }
-        if let connectedCamera = deviceManager.paired.first(where: { $0.roles.contains(.camera) && $0.connection == .connected }) {
-            return connectedCamera
-        }
-        return deviceManager.paired.first(where: { $0.capabilities.contains(.camera) })
+        return deviceManager.cameraDevices.first
     }
 }
 
 // MARK: - Sidebar
 struct Sidebar: View {
-    var participants: [StageParticipant]
+    var participants: [ParticipantDisplay]
     @Binding var selectedId: UUID?
     var onSettings: () -> Void
     var onCamera: () -> Void
@@ -320,14 +336,22 @@ struct Sidebar: View {
 }
 
 struct ParticipantRow: View {
-    let participant: StageParticipant
+    let participant: ParticipantDisplay
     @ObservedObject private var feed: DeviceVideoFeed
     let isSelected: Bool
 
-    init(participant: StageParticipant, isSelected: Bool = false) {
+    init(participant: ParticipantDisplay, isSelected: Bool = false) {
         self.participant = participant
         self.isSelected = isSelected
         _feed = ObservedObject(wrappedValue: participant.feed)
+    }
+
+    private var roleColor: Color {
+        switch participant.role {
+        case .camera: return .green
+        case .viewer: return .blue
+        case .none: return .gray.opacity(0.6)
+        }
     }
 
     var body: some View {
@@ -340,13 +364,23 @@ struct ParticipantRow: View {
                     .foregroundStyle(.white)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(participant.name)
                         .foregroundStyle(.white)
                         .font(.system(size: 16, weight: .semibold))
+                        .lineLimit(1)
+                    if let role = participant.role {
+                        Text(role.rawValue.uppercased())
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(roleColor.opacity(0.2))
+                            .foregroundStyle(roleColor)
+                            .clipShape(Capsule())
+                    }
                     if feed.isSpeaking {
-                        Text("Speaking")
+                        Text("SPEAKING")
                             .font(.caption2.weight(.bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
@@ -355,7 +389,6 @@ struct ParticipantRow: View {
                             .clipShape(Capsule())
                     }
                 }
-                .lineLimit(1)
                 Text(feed.connectionState)
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.7))
@@ -477,6 +510,15 @@ struct VideoTile: View {
                         .padding(.vertical, 6)
                         .background(.black.opacity(0.6))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    if let role = participant.role {
+                        Text(participant.roleLabel)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background((role == .camera ? Color.green : Color.blue).opacity(0.2))
+                            .foregroundStyle(role == .camera ? Color.green : Color.blue)
+                            .clipShape(Capsule())
+                    }
                     Text(feed.connectionState)
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 8)
