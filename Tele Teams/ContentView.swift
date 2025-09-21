@@ -8,12 +8,23 @@
 import SwiftUI
 
 // MARK: - Models
-struct Participant: Identifiable, Hashable {
-    let id = UUID()
-    var name: String
-    var isSpeaking: Bool = false
-    var isMuted: Bool = false
-    var isVideoOff: Bool = false
+struct StageParticipant: Identifiable, Hashable {
+    let device: Device
+    let feed: DeviceVideoFeed
+
+    var id: UUID { device.id }
+    var name: String { device.name }
+    var isSpeaking: Bool { feed.isSpeaking }
+    var isMuted: Bool { feed.isMuted }
+    var isVideoOff: Bool { !feed.isVideoEnabled }
+
+    static func == (lhs: StageParticipant, rhs: StageParticipant) -> Bool {
+        lhs.device.id == rhs.device.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(device.id)
+    }
 }
 
 // MARK: - Root View
@@ -21,17 +32,19 @@ struct ContentView: View {
     @StateObject private var deviceManager = DeviceManager()
     @State private var showConnectivityManager = false
     @State private var showCameraPublisher = false
-    private let cameraSender = MockMediaSender()
-    @State private var participants: [Participant] = [
-        .init(name: "Jason", isSpeaking: true, isMuted: false),
-        .init(name: "Brett", isSpeaking: false, isMuted: true),
-        .init(name: "Mike", isSpeaking: false, isMuted: true),
-        .init(name: "James", isSpeaking: false, isMuted: true)
-    ]
-    @State private var selectedId: UUID?
+    @State private var selectedDeviceId: UUID?
+    @State private var activeSender: MediaSender?
+    @State private var cameraError: String?
     @Environment(\.horizontalSizeClass) private var hSizeClass
     private enum CompactTab: String, CaseIterable { case stage = "Stage", participants = "Participants" }
     @State private var compactTab: CompactTab = .stage
+
+    private var stageParticipants: [StageParticipant] {
+        deviceManager.paired
+            .filter { $0.connection == .connected && $0.roles.contains(.camera) }
+            .map { StageParticipant(device: $0, feed: deviceManager.feed(for: $0)) }
+            .sorted { $0.name < $1.name }
+    }
 
     var body: some View {
         Group {
@@ -64,20 +77,20 @@ struct ContentView: View {
                             switch compactTab {
                             case .stage:
                                 ScrollView {
-                                    StageGrid(participants: participants,
-                                              selectedId: $selectedId,
+                                    StageGrid(participants: stageParticipants,
+                                              selectedId: $selectedDeviceId,
                                               isCompact: hSizeClass == .compact,
-                                              onSelect: { selectedId = $0 })
+                                              onSelect: { selectedDeviceId = $0 })
                                     .padding(.horizontal, 12)
                                     .padding(.top, 8)
                                 }
                             case .participants:
                                 ScrollView {
                                     Sidebar(
-                                        participants: $participants,
-                                        selectedId: $selectedId,
+                                        participants: stageParticipants,
+                                        selectedId: $selectedDeviceId,
                                         onSettings: { showConnectivityManager = true },
-                                        onCamera: { showCameraPublisher = true },
+                                        onCamera: presentCameraPublisher,
                                         onBluetooth: { print("Bluetooth tapped") }
                                     )
                                     .frame(maxWidth: .infinity)
@@ -106,10 +119,10 @@ struct ContentView: View {
                 // Regular iPad/large layout
                 HStack(spacing: 0) {
                     Sidebar(
-                        participants: $participants,
-                        selectedId: $selectedId,
+                        participants: stageParticipants,
+                        selectedId: $selectedDeviceId,
                         onSettings: { showConnectivityManager = true },
-                        onCamera: { showCameraPublisher = true },
+                        onCamera: presentCameraPublisher,
                         onBluetooth: { print("Bluetooth tapped") }
                     )
                         .frame(width: 320)
@@ -136,10 +149,10 @@ struct ContentView: View {
                         .ignoresSafeArea()
 
                         VStack(spacing: 16) {
-                            StageGrid(participants: participants,
-                                      selectedId: $selectedId,
+                            StageGrid(participants: stageParticipants,
+                                      selectedId: $selectedDeviceId,
                                       isCompact: hSizeClass == .compact,
-                                      onSelect: { selectedId = $0 })
+                                      onSelect: { selectedDeviceId = $0 })
                                 .padding(.horizontal, 20)
                                 .padding(.top, 20)
 
@@ -164,30 +177,81 @@ struct ContentView: View {
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
         }
-        .sheet(isPresented: $showCameraPublisher) {
-            CameraPublisherView(sender: cameraSender)
-                .preferredColorScheme(.dark)
+        .sheet(isPresented: $showCameraPublisher, onDismiss: { activeSender = nil }) {
+            if let sender = activeSender {
+                CameraPublisherView(sender: sender)
+                    .preferredColorScheme(.dark)
+            } else {
+                Text("Select a camera-enabled device from the Device Manager.")
+                    .padding()
+            }
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            if selectedId == nil { selectedId = participants.first?.id }
+            alignSelection()
+        }
+        .onReceive(deviceManager.$paired) { _ in alignSelection() }
+        .alert("Camera Publisher", isPresented: .init(
+            get: { cameraError != nil },
+            set: { if !$0 { cameraError = nil } }
+        ), presenting: cameraError) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { message in
+            Text(message)
         }
     }
 
     private func toggleMuteSelected() {
-        guard let id = selectedId, let idx = participants.firstIndex(where: { $0.id == id }) else { return }
-        participants[idx].isMuted.toggle()
+        guard let id = selectedDeviceId else { return }
+        deviceManager.toggleMute(for: id)
     }
 
     private func toggleVideoSelected() {
-        guard let id = selectedId, let idx = participants.firstIndex(where: { $0.id == id }) else { return }
-        participants[idx].isVideoOff.toggle()
+        guard let id = selectedDeviceId else { return }
+        deviceManager.toggleVideo(for: id)
+    }
+
+    private func alignSelection() {
+        let participants = stageParticipants
+        if let current = selectedDeviceId, participants.contains(where: { $0.id == current }) {
+            return
+        }
+        selectedDeviceId = participants.first?.id
+    }
+
+    private func presentCameraPublisher() {
+        guard let target = cameraTargetDevice() else {
+            cameraError = "No camera-capable devices are paired. Pair and connect a device in the Connectivity Manager first."
+            return
+        }
+        if target.connection == .disconnected {
+            deviceManager.connect(target)
+        }
+        if !target.roles.contains(.camera) {
+            deviceManager.assign(.camera, to: target)
+        }
+        guard let sender = deviceManager.mediaSender(for: target.id) else {
+            cameraError = "Unable to create a media sender for \(target.name)."
+            return
+        }
+        activeSender = sender
+        showCameraPublisher = true
+    }
+
+    private func cameraTargetDevice() -> Device? {
+        if let id = selectedDeviceId, let device = deviceManager.device(for: id) {
+            return device
+        }
+        if let connectedCamera = deviceManager.paired.first(where: { $0.roles.contains(.camera) && $0.connection == .connected }) {
+            return connectedCamera
+        }
+        return deviceManager.paired.first(where: { $0.capabilities.contains(.camera) })
     }
 }
 
 // MARK: - Sidebar
 struct Sidebar: View {
-    @Binding var participants: [Participant]
+    var participants: [StageParticipant]
     @Binding var selectedId: UUID?
     var onSettings: () -> Void
     var onCamera: () -> Void
@@ -259,7 +323,7 @@ struct Sidebar: View {
 }
 
 struct ParticipantRow: View {
-    let participant: Participant
+    let participant: StageParticipant
     var isSelected: Bool = false
 
     var body: some View {
@@ -288,6 +352,9 @@ struct ParticipantRow: View {
                     }
                 }
                 .lineLimit(1)
+                Text(participant.feed.connectionState)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.7))
             }
             Spacer()
 
@@ -332,7 +399,7 @@ struct FooterCircleButton: View {
 
 // MARK: - Stage Grid
 struct StageGrid: View {
-    let participants: [Participant]
+    let participants: [StageParticipant]
     @Binding var selectedId: UUID?
     var isCompact: Bool = false
     var onSelect: (UUID) -> Void
@@ -356,30 +423,37 @@ struct StageGrid: View {
 }
 
 struct VideoTile: View {
-    let participant: Participant
+    let participant: StageParticipant
     var isSelected: Bool = false
     var isCompact: Bool = false
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.black.opacity(0.55))
+                .fill(Color.black.opacity(0.75))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(isSelected ? Color.green : .clear, lineWidth: 3)
                 )
 
-            VStack {
-                Spacer()
-                Circle()
-                    .fill(participant.isSpeaking ? Color.green : Color.gray.opacity(0.6))
-                    .frame(width: isCompact ? 72 : 96, height: isCompact ? 72 : 96)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 44, weight: .bold))
-                            .foregroundStyle(.white)
-                    )
-                Spacer()
+            if participant.feed.isPublishing, participant.feed.isVideoEnabled, let image = participant.feed.currentFrame {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                VStack {
+                    Spacer()
+                    Circle()
+                        .fill(participant.isSpeaking ? Color.green : Color.gray.opacity(0.6))
+                        .frame(width: isCompact ? 72 : 96, height: isCompact ? 72 : 96)
+                        .overlay(
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 44, weight: .bold))
+                                .foregroundStyle(.white)
+                        )
+                    Spacer()
+                }
             }
 
             // Name tag top-left
@@ -391,6 +465,12 @@ struct VideoTile: View {
                         .padding(.vertical, 6)
                         .background(.black.opacity(0.6))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    Text(participant.feed.connectionState)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.45))
+                        .clipShape(Capsule())
                     Circle()
                         .fill(participant.isSpeaking ? Color.green : Color.gray)
                         .frame(width: 8, height: 8)
@@ -411,6 +491,12 @@ struct VideoTile: View {
                             .fill(Color.red)
                             .frame(width: isCompact ? 26 : 30, height: isCompact ? 26 : 30)
                             .overlay(Image(systemName: "speaker.slash.fill").foregroundStyle(.white))
+                            .padding(isCompact ? 10 : 12)
+                    } else if participant.isVideoOff {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: isCompact ? 26 : 30, height: isCompact ? 26 : 30)
+                            .overlay(Image(systemName: "video.slash.fill").foregroundStyle(.white))
                             .padding(isCompact ? 10 : 12)
                     }
                 }
