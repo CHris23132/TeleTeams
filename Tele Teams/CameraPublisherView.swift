@@ -217,9 +217,12 @@ extension CameraPublisherViewModel: AVCaptureVideoDataOutputSampleBufferDelegate
 struct CameraPublisherView: View {
     @StateObject private var vm: CameraPublisherViewModel
     @State private var previewLayer = AVCaptureVideoPreviewLayer()
+    @State private var hasAutoStarted = false
+    private let autoStartPublishing: Bool
 
-    init(sender: MediaSender) {
+    init(sender: MediaSender, autoStartPublishing: Bool = false) {
         _vm = StateObject(wrappedValue: CameraPublisherViewModel(sender: sender))
+        self.autoStartPublishing = autoStartPublishing
     }
 
     var body: some View {
@@ -257,7 +260,13 @@ struct CameraPublisherView: View {
             }
         }
         .onAppear {
-            Task { await vm.configureAndStartPreview(on: previewLayer) }
+            Task {
+                await vm.configureAndStartPreview(on: previewLayer)
+                if autoStartPublishing && !hasAutoStarted {
+                    hasAutoStarted = true
+                    vm.startPublishing()
+                }
+            }
         }
         .onDisappear { vm.stopPublishing() }
         .preferredColorScheme(.dark)
