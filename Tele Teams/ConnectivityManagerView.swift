@@ -18,6 +18,7 @@ struct ConnectivityManagerView: View {
                         ForEach(deviceManager.paired) { device in
                             DeviceRow(
                                 device: device,
+                                feed: deviceManager.feedIfExists(for: device.id),
                                 connect: { deviceManager.connect(device) },
                                 disconnect: { deviceManager.disconnect(device) },
                                 pairToggle: { deviceManager.unpair(device) },
@@ -33,6 +34,7 @@ struct ConnectivityManagerView: View {
                     ForEach(deviceManager.nearby) { device in
                         DeviceRow(
                             device: device,
+                            feed: deviceManager.feedIfExists(for: device.id),
                             connect: {
                                 deviceManager.pair(device)
                                 deviceManager.connect(device)
@@ -64,6 +66,7 @@ struct ConnectivityManagerView: View {
 // MARK: - Device Row
 private struct DeviceRow: View {
     let device: Device
+    let feed: DeviceVideoFeed?
     let connect: () -> Void
     let disconnect: () -> Void
     let pairToggle: () -> Void
@@ -158,19 +161,9 @@ private struct DeviceRow: View {
             }
 
             if showPreview && device.supportsVideo {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(.black.opacity(0.6))
+                DevicePreviewSurface(feed: feed)
                     .frame(height: 140)
-                    .overlay(
-                        VStack(spacing: 8) {
-                            Image(systemName: "video.fill")
-                                .font(.largeTitle)
-                                .foregroundStyle(.white.opacity(0.9))
-                            Text("Video Preview")
-                                .foregroundStyle(.white.opacity(0.8))
-                                .font(.footnote)
-                        }
-                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .transition(.opacity.combined(with: .scale))
             }
 
@@ -241,5 +234,46 @@ private struct DeviceRow: View {
         case .mic: return "mic.fill"
         case .speaker: return "speaker.wave.2.fill"
         }
+    }
+}
+
+private struct DevicePreviewSurface: View {
+    let feed: DeviceVideoFeed?
+
+    var body: some View {
+        Group {
+            if let feed, feed.isPublishing, feed.isVideoEnabled, let image = feed.currentFrame {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .overlay(alignment: .topLeading) {
+                        previewOverlay(state: feed.connectionState)
+                    }
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.black.opacity(0.6))
+                    VStack(spacing: 8) {
+                        Image(systemName: "video.fill")
+                            .font(.largeTitle)
+                            .foregroundStyle(.white.opacity(0.9))
+                        Text("Video Preview")
+                            .foregroundStyle(.white.opacity(0.8))
+                            .font(.footnote)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func previewOverlay(state: String) -> some View {
+        Text(state)
+            .font(.caption.bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.5), in: Capsule())
+            .foregroundStyle(.white)
+            .padding(10)
     }
 }
