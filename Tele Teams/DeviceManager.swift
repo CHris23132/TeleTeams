@@ -7,12 +7,16 @@
 
 import Foundation
 import Combine
-import Foundation
 import SwiftUI
+import AVFoundation
+import UIKit
+import VideoToolbox
 
+@MainActor
 final class DeviceManager: ObservableObject {
     @Published var nearby: [Device] = []
     @Published var paired: [Device] = []
+    @Published private(set) var videoFeeds: [UUID: DeviceVideoFeed] = [:]
 
     private var discoveryTimer: Timer?
 
@@ -73,6 +77,10 @@ final class DeviceManager: ObservableObject {
                     // keep as-is; in real impl wire the streams
                 }
             }
+            if let updated = self.device(for: device.id) {
+                let feed = self.feed(for: updated)
+                feed.connectionState = "Connected"
+            }
         }
     }
 
@@ -81,6 +89,9 @@ final class DeviceManager: ObservableObject {
             $0.connection = .disconnected
             $0.talkbackEnabled = false
             // Keep roles as assigned, just drop the live streams
+        }
+        if let feed = videoFeeds[device.id] {
+            feed.reset()
         }
     }
 
@@ -96,17 +107,83 @@ final class DeviceManager: ObservableObject {
         update(device) { $0.talkbackEnabled = enabled }
     }
 
+    func toggleMute(for deviceId: UUID) {
+        guard let feed = videoFeeds[deviceId] else { return }
+        feed.isMuted.toggle()
+    }
+
+    func toggleVideo(for deviceId: UUID) {
+        guard let feed = videoFeeds[deviceId] else { return }
+        feed.isVideoEnabled.toggle()
+        if !feed.isVideoEnabled {
+            feed.connectionState = "Video Off"
+            feed.currentFrame = nil
+        } else if feed.isPublishing {
+            feed.connectionState = "Streaming"
+        } else if let device = device(for: deviceId) {
+            feed.connectionState = device.connection.displayLabel
+        }
+    }
+
+    func markPublishing(_ isPublishing: Bool, deviceId: UUID) {
+        guard let feed = videoFeeds[deviceId] else { return }
+        feed.isPublishing = isPublishing
+        if isPublishing {
+            feed.connectionState = "Streaming"
+        } else if let device = device(for: deviceId) {
+            feed.connectionState = device.connection.displayLabel
+            feed.currentFrame = nil
+        } else {
+            feed.connectionState = "Idle"
+            feed.currentFrame = nil
+        }
+    }
+
+    func mediaSender(for deviceId: UUID) -> MediaSender? {
+        guard let device = device(for: deviceId) else { return nil }
+        let feed = feed(for: device)
+        return DeviceLoopbackMediaSender(deviceId: deviceId, manager: self, feed: feed)
+    }
+
+    func feed(for device: Device) -> DeviceVideoFeed {
+        if let existing = videoFeeds[device.id] {
+            existing.update(from: device)
+            return existing
+        }
+        let feed = DeviceVideoFeed(device: device)
+        videoFeeds[device.id] = feed
+        return feed
+    }
+
+    func feedIfExists(for deviceId: UUID) -> DeviceVideoFeed? {
+        videoFeeds[deviceId]
+    }
+
+    func device(for id: UUID) -> Device? {
+        if let paired = paired.first(where: { $0.id == id }) { return paired }
+        if let nearby = nearby.first(where: { $0.id == id }) { return nearby }
+        return nil
+    }
+
     // MARK: - Helpers
     private func update(_ device: Device, mutate: (inout Device) -> Void) {
         if let idx = paired.firstIndex(where: { $0.id == device.id }) {
             var copy = paired[idx]
             mutate(&copy)
             paired[idx] = copy
+            syncFeed(with: copy)
         } else if let idx = nearby.firstIndex(where: { $0.id == device.id }) {
             var copy = nearby[idx]
             mutate(&copy)
             nearby[idx] = copy
+            syncFeed(with: copy)
         }
+    }
+
+    private func syncFeed(with device: Device) {
+        guard device.roles.contains(.camera) else { return }
+        let feed = feed(for: device)
+        feed.update(from: device)
     }
 }
 
@@ -137,4 +214,104 @@ struct Device: Identifiable, Hashable {
     var supportsVideo: Bool { capabilities.contains(.camera) }
     var supportsAudioIn: Bool { capabilities.contains(.mic) }
     var supportsAudioOut: Bool { capabilities.contains(.speaker) }
+}
+
+@MainActor
+final class DeviceVideoFeed: ObservableObject, Identifiable {
+    let deviceId: UUID
+    @Published var deviceName: String
+    @Published var currentFrame: UIImage?
+    @Published var isPublishing: Bool = false
+    @Published var isMuted: Bool = false
+    @Published var isVideoEnabled: Bool = true
+    @Published var connectionState: String
+    @Published var isSpeaking: Bool = false
+
+    init(device: Device) {
+        self.deviceId = device.id
+        self.deviceName = device.name
+        self.connectionState = device.connection.displayLabel
+    }
+
+    func update(from device: Device) {
+        deviceName = device.name
+        if !isPublishing && connectionState != "Video Off" {
+            connectionState = device.connection.displayLabel
+        }
+    }
+
+    func reset() {
+        isPublishing = false
+        currentFrame = nil
+        connectionState = "Disconnected"
+        isVideoEnabled = true
+        isMuted = false
+        isSpeaking = false
+    }
+}
+
+final class DeviceLoopbackMediaSender: MediaSender {
+    private let deviceId: UUID
+    private weak var manager: DeviceManager?
+    private let feed: DeviceVideoFeed
+    private let state = CurrentValueSubject<String, Never>("Idle")
+
+    var connectionStatePublisher: AnyPublisher<String, Never> {
+        state.eraseToAnyPublisher()
+    }
+
+    init(deviceId: UUID, manager: DeviceManager, feed: DeviceVideoFeed) {
+        self.deviceId = deviceId
+        self.manager = manager
+        self.feed = feed
+    }
+
+    func startPublishing() async throws {
+        await MainActor.run {
+            self.manager?.markPublishing(true, deviceId: self.deviceId)
+        }
+        state.send("Streaming")
+    }
+
+    func stopPublishing() {
+        Task { @MainActor in
+            self.manager?.markPublishing(false, deviceId: self.deviceId)
+        }
+        state.send("Stopped")
+    }
+
+    func sendVideo(sampleBuffer: CMSampleBuffer) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        var cgImage: CGImage?
+        VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
+        guard let cgImage else { return }
+        let image = UIImage(cgImage: cgImage)
+
+        Task { @MainActor in
+            guard self.feed.isVideoEnabled else { return }
+            self.feed.currentFrame = image
+        }
+    }
+
+    func sendAudio(sampleBuffer: CMSampleBuffer) {
+        // In a real implementation, pipe audio to the connected session.
+    }
+
+    func setReturnAudioEnabled(_ enabled: Bool) {
+        // Loopback mock ignores talkback routing.
+    }
+
+    func pushToTalk(_ isDown: Bool) {
+        // Loopback mock ignores push-to-talk gating.
+    }
+}
+
+private extension Device.Connection {
+    var displayLabel: String {
+        switch self {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting"
+        case .connected: return "Connected"
+        }
+    }
 }
