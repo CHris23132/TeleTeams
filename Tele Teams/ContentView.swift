@@ -18,6 +18,10 @@ struct Participant: Identifiable, Hashable {
 
 // MARK: - Root View
 struct ContentView: View {
+    @StateObject private var deviceManager = DeviceManager()
+    @State private var showConnectivityManager = false
+    @State private var showCameraPublisher = false
+    private let cameraSender = MockMediaSender()
     @State private var participants: [Participant] = [
         .init(name: "Jason", isSpeaking: true, isMuted: false),
         .init(name: "Brett", isSpeaking: false, isMuted: true),
@@ -25,45 +29,69 @@ struct ContentView: View {
         .init(name: "James", isSpeaking: false, isMuted: true)
     ]
     @State private var selectedId: UUID?
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    private enum CompactTab: String, CaseIterable { case stage = "Stage", participants = "Participants" }
+    @State private var compactTab: CompactTab = .stage
 
     var body: some View {
-        HStack(spacing: 0) {
-            Sidebar(participants: $participants,
-                    selectedId: $selectedId,
-                    onSettings: { print("Settings tapped") },
-                    onBluetooth: { print("Bluetooth tapped") })
-                .frame(width: 320)
-                .background(
+        Group {
+            if hSizeClass == .compact {
+                // iPhone-friendly compact layout
+                ZStack {
                     LinearGradient(
-                        colors: [Color(hue: 0.62, saturation: 0.68, brightness: 0.20),
-                                 Color(hue: 0.70, saturation: 0.69, brightness: 0.16)],
+                        colors: [
+                            Color(hue: 0.66, saturation: 0.65, brightness: 0.24),
+                            Color(hue: 0.74, saturation: 0.65, brightness: 0.25)
+                        ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
-                )
+                    .ignoresSafeArea()
 
-            Divider().opacity(0.12)
+                    VStack(spacing: 12) {
+                        // Top segmented control to switch between Stage and Participants
+                        Picker("Section", selection: $compactTab) {
+                            ForEach(CompactTab.allCases, id: \.self) { tab in
+                                Text(tab.rawValue).tag(tab)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
 
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(hue: 0.66, saturation: 0.65, brightness: 0.24),
-                        Color(hue: 0.74, saturation: 0.65, brightness: 0.25)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
+                        // Content area
+                        Group {
+                            switch compactTab {
+                            case .stage:
+                                ScrollView {
+                                    StageGrid(participants: participants,
+                                              selectedId: $selectedId,
+                                              isCompact: hSizeClass == .compact,
+                                              onSelect: { selectedId = $0 })
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 8)
+                                }
+                            case .participants:
+                                ScrollView {
+                                    Sidebar(
+                                        participants: $participants,
+                                        selectedId: $selectedId,
+                                        onSettings: { showConnectivityManager = true },
+                                        onCamera: { showCameraPublisher = true },
+                                        onBluetooth: { print("Bluetooth tapped") }
+                                    )
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 4)
+                                }
+                            }
+                        }
 
-                VStack(spacing: 16) {
-                    StageGrid(participants: participants,
-                              selectedId: $selectedId,
-                              onSelect: { selectedId = $0 })
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-
-                    Spacer(minLength: 6)
-
+                        Spacer(minLength: 0)
+                    }
+                }
+                // Keep bottom controls visible above the home indicator
+                .safeAreaInset(edge: .bottom) {
                     BottomControlBar(
                         onToggleMute: { toggleMuteSelected() },
                         onToggleVideo: { toggleVideoSelected() },
@@ -71,9 +99,74 @@ struct ContentView: View {
                         onMore: { print("More tapped") },
                         onMention: { print("Mention tapped") }
                     )
-                    .padding(.bottom, 18)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+                }
+            } else {
+                // Regular iPad/large layout
+                HStack(spacing: 0) {
+                    Sidebar(
+                        participants: $participants,
+                        selectedId: $selectedId,
+                        onSettings: { showConnectivityManager = true },
+                        onCamera: { showCameraPublisher = true },
+                        onBluetooth: { print("Bluetooth tapped") }
+                    )
+                        .frame(width: 320)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(hue: 0.62, saturation: 0.68, brightness: 0.20),
+                                         Color(hue: 0.70, saturation: 0.69, brightness: 0.16)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+
+                    Divider().opacity(0.12)
+
+                    ZStack {
+                        LinearGradient(
+                            colors: [
+                                Color(hue: 0.66, saturation: 0.65, brightness: 0.24),
+                                Color(hue: 0.74, saturation: 0.65, brightness: 0.25)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .ignoresSafeArea()
+
+                        VStack(spacing: 16) {
+                            StageGrid(participants: participants,
+                                      selectedId: $selectedId,
+                                      isCompact: hSizeClass == .compact,
+                                      onSelect: { selectedId = $0 })
+                                .padding(.horizontal, 20)
+                                .padding(.top, 20)
+
+                            Spacer(minLength: 6)
+
+                            BottomControlBar(
+                                onToggleMute: { toggleMuteSelected() },
+                                onToggleVideo: { toggleVideoSelected() },
+                                onShareScreen: { print("Share Screen tapped") },
+                                onMore: { print("More tapped") },
+                                onMention: { print("Mention tapped") }
+                            )
+                            .padding(.bottom, 18)
+                        }
+                    }
                 }
             }
+        }
+        .sheet(isPresented: $showConnectivityManager) {
+            ConnectivityManagerView(deviceManager: deviceManager)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showCameraPublisher) {
+            CameraPublisherView(sender: cameraSender)
+                .preferredColorScheme(.dark)
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -97,6 +190,7 @@ struct Sidebar: View {
     @Binding var participants: [Participant]
     @Binding var selectedId: UUID?
     var onSettings: () -> Void
+    var onCamera: () -> Void
     var onBluetooth: () -> Void
 
     var body: some View {
@@ -154,6 +248,7 @@ struct Sidebar: View {
             // Footer buttons
             HStack(spacing: 18) {
                 FooterCircleButton(systemName: "gearshape", action: onSettings)
+                FooterCircleButton(systemName: "camera", action: onCamera)
                 FooterCircleButton(systemName: "bluetooth", action: onBluetooth)
                 Spacer()
             }
@@ -239,14 +334,21 @@ struct FooterCircleButton: View {
 struct StageGrid: View {
     let participants: [Participant]
     @Binding var selectedId: UUID?
+    var isCompact: Bool = false
     var onSelect: (UUID) -> Void
 
-    private let columns: [GridItem] = Array(repeating: GridItem(.flexible(), spacing: 16), count: 2)
+    private var columns: [GridItem] {
+        if isCompact {
+            return [GridItem(.adaptive(minimum: 220, maximum: 380), spacing: 12)]
+        } else {
+            return Array(repeating: GridItem(.flexible(), spacing: 16), count: 2)
+        }
+    }
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 16) {
+        LazyVGrid(columns: columns, spacing: isCompact ? 12 : 16) {
             ForEach(participants) { p in
-                VideoTile(participant: p, isSelected: p.id == selectedId)
+                VideoTile(participant: p, isSelected: p.id == selectedId, isCompact: isCompact)
                     .onTapGesture { onSelect(p.id) }
             }
         }
@@ -256,6 +358,7 @@ struct StageGrid: View {
 struct VideoTile: View {
     let participant: Participant
     var isSelected: Bool = false
+    var isCompact: Bool = false
 
     var body: some View {
         ZStack {
@@ -270,7 +373,7 @@ struct VideoTile: View {
                 Spacer()
                 Circle()
                     .fill(participant.isSpeaking ? Color.green : Color.gray.opacity(0.6))
-                    .frame(width: 96, height: 96)
+                    .frame(width: isCompact ? 72 : 96, height: isCompact ? 72 : 96)
                     .overlay(
                         Image(systemName: "person.fill")
                             .font(.system(size: 44, weight: .bold))
@@ -306,14 +409,14 @@ struct VideoTile: View {
                     if participant.isMuted {
                         Circle()
                             .fill(Color.red)
-                            .frame(width: 30, height: 30)
+                            .frame(width: isCompact ? 26 : 30, height: isCompact ? 26 : 30)
                             .overlay(Image(systemName: "speaker.slash.fill").foregroundStyle(.white))
-                            .padding(12)
+                            .padding(isCompact ? 10 : 12)
                     }
                 }
             }
         }
-        .frame(minHeight: 200)
+        .aspectRatio(16/9, contentMode: .fit)
     }
 }
 
@@ -358,6 +461,24 @@ struct ControlCircleButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Text(symbol))
     }
+}
+
+// MARK: - MockMediaSender for Preview/Testing
+import AVFoundation
+import Combine
+
+final class MockMediaSender: MediaSender {
+    private let state = CurrentValueSubject<String, Never>("Idle")
+    var connectionStatePublisher: AnyPublisher<String, Never> { state.eraseToAnyPublisher() }
+
+    func startPublishing() async throws { state.send("Connected") }
+    func stopPublishing() { state.send("Stopped") }
+
+    func sendVideo(sampleBuffer: CMSampleBuffer) { /* no-op for mock */ }
+    func sendAudio(sampleBuffer: CMSampleBuffer) { /* no-op for mock */ }
+
+    func setReturnAudioEnabled(_ enabled: Bool) { /* no-op */ }
+    func pushToTalk(_ isDown: Bool) { /* no-op */ }
 }
 
 // MARK: - Preview

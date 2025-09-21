@@ -255,6 +255,10 @@
 				DEVELOPMENT_TEAM = F8A5YKCK62;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Tele-Teams-Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "This app requires access to the camera for video streaming.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app connects to and discovers devices on your local network for audio and video streaming.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app uses the microphone for talkback communication.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -283,6 +287,10 @@
 				DEVELOPMENT_TEAM = F8A5YKCK62;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Tele-Teams-Info.plist";
+				INFOPLIST_KEY_NSCameraUsageDescription = "This app requires access to the camera for video streaming.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "This app connects to and discovers devices on your local network for audio and video streaming.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app uses the microphone for talkback communication.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
