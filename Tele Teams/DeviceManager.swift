@@ -141,20 +141,20 @@ final class DeviceManager: ObservableObject {
             feed.connectionState = "Video Disabled"
             stopStream(for: deviceId)
         } else {
-            feed.connectionState = "Streaming"
-            startStream(for: deviceId, feed: feed)
+            feed.connectionState = feed.streamingMode.displayLabel
+            if feed.streamingMode == .simulated {
+                startStream(for: deviceId, feed: feed)
+            }
         }
     }
 
-    func markPublishing(_ isPublishing: Bool, deviceId: UUID) {
+    func markPublishing(_ isPublishing: Bool, deviceId: UUID, mode: DeviceVideoFeed.StreamingMode = .simulated) {
         guard device(for: deviceId) != nil else { return }
         mutateDevice(id: deviceId) { device in
             if isPublishing {
                 device.connection = .streaming
-            } else if device.role == .viewer {
-                device.connection = .connected
             } else if device.pairingProgress == .paired {
-                device.connection = .pairing
+                device.connection = .connected
             } else {
                 device.connection = .disconnected
             }
@@ -163,12 +163,23 @@ final class DeviceManager: ObservableObject {
         guard let updatedDevice = device(for: deviceId) else { return }
         guard let feed = videoFeeds[deviceId] ?? (updatedDevice.role != nil ? feed(for: updatedDevice) : nil) else { return }
         feed.isPublishing = isPublishing
+        feed.streamingMode = isPublishing ? mode : .none
         if isPublishing {
-            feed.connectionState = "Streaming"
+            feed.connectionState = mode.displayLabel
             feed.isVideoEnabled = true
-            startStream(for: deviceId, feed: feed)
+            if mode == .simulated {
+                startStream(for: deviceId, feed: feed)
+            } else {
+                stopStream(for: deviceId)
+            }
         } else {
-            feed.connectionState = updatedDevice.connection.displayLabel
+            if updatedDevice.role == .viewer {
+                feed.connectionState = "Viewer Connected"
+            } else if updatedDevice.role == .camera {
+                feed.connectionState = "Camera Ready"
+            } else {
+                feed.connectionState = updatedDevice.connection.displayLabel
+            }
             feed.currentFrame = nil
             stopStream(for: deviceId)
         }
@@ -289,6 +300,20 @@ struct Device: Identifiable, Hashable {
 
 @MainActor
 final class DeviceVideoFeed: ObservableObject, Identifiable {
+    enum StreamingMode: Equatable {
+        case none
+        case simulated
+        case external
+
+        var displayLabel: String {
+            switch self {
+            case .none: return "Offline"
+            case .simulated: return "Streaming"
+            case .external: return "Live"
+            }
+        }
+    }
+
     let deviceId: UUID
     @Published var deviceName: String
     @Published var roleLabel: String
@@ -298,6 +323,7 @@ final class DeviceVideoFeed: ObservableObject, Identifiable {
     @Published var isVideoEnabled: Bool = true
     @Published var connectionState: String
     @Published var isSpeaking: Bool = false
+    @Published var streamingMode: StreamingMode = .none
 
     init(device: Device) {
         self.deviceId = device.id
@@ -339,6 +365,7 @@ final class DeviceVideoFeed: ObservableObject, Identifiable {
         isMuted = false
         isSpeaking = false
         roleLabel = "Unassigned"
+        streamingMode = .none
     }
 }
 
@@ -361,9 +388,9 @@ final class DeviceLoopbackMediaSender: MediaSender {
 
     func startPublishing() async throws {
         await MainActor.run {
-            self.manager?.markPublishing(true, deviceId: self.deviceId)
+            self.manager?.markPublishing(true, deviceId: self.deviceId, mode: .external)
         }
-        state.send("Streaming")
+        state.send(DeviceVideoFeed.StreamingMode.external.displayLabel)
     }
 
     func stopPublishing() {
@@ -382,6 +409,7 @@ final class DeviceLoopbackMediaSender: MediaSender {
 
         Task { @MainActor in
             guard self.feed.isVideoEnabled else { return }
+            self.feed.connectionState = DeviceVideoFeed.StreamingMode.external.displayLabel
             self.feed.currentFrame = image
             self.feed.isSpeaking = Bool.random() && Bool.random()
         }
@@ -435,6 +463,10 @@ private final class VideoStreamSimulator {
         }
 
         guard feed.isVideoEnabled else { return }
+        guard feed.streamingMode == .simulated else {
+            stop()
+            return
+        }
 
         let size = CGSize(width: 640, height: 360)
         let renderer = UIGraphicsImageRenderer(size: size)

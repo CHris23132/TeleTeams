@@ -481,11 +481,26 @@ struct VideoTile: View {
                         .stroke(isSelected ? Color.green : .clear, lineWidth: 3)
                 )
 
-            if feed.isPublishing, feed.isVideoEnabled, let image = feed.currentFrame {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            if feed.isPublishing, feed.isVideoEnabled {
+                if let image = feed.currentFrame {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black.opacity(0.75))
+                        .overlay {
+                            VStack(spacing: 10) {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .tint(.white)
+                                Text("Connecting to camera…")
+                                    .font(.footnote)
+                                    .foregroundStyle(.white.opacity(0.75))
+                            }
+                        }
+                }
             } else {
                 VStack {
                     Spacer()

@@ -372,13 +372,17 @@ private struct DevicePreviewSurface: View {
 
     var body: some View {
         ZStack {
-            if feed.isPublishing, feed.isVideoEnabled, let image = feed.currentFrame {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .overlay(alignment: .topLeading) {
-                        previewOverlay
-                    }
+            if feed.isPublishing, feed.isVideoEnabled {
+                if let image = feed.currentFrame {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .overlay(alignment: .topLeading) {
+                            previewOverlay
+                        }
+                } else {
+                    waitingView
+                }
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.black.opacity(0.7))
@@ -405,5 +409,20 @@ private struct DevicePreviewSurface: View {
             .background(Color.black.opacity(0.6), in: Capsule())
             .foregroundStyle(.white)
             .padding(10)
+    }
+
+    private var waitingView: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color.black.opacity(0.7))
+            .overlay {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                    Text("Waiting for camera feed…")
+                        .foregroundStyle(.white.opacity(0.75))
+                        .font(.footnote)
+                }
+            }
     }
 }
